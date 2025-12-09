@@ -77,6 +77,7 @@
 #define GREEN 0x0200   //   0 64  0
 #define RED 0xF800     // 255  0  0
 #define YELLOW 0xFFE0  // 255 255  0
+#define GREEN_FULL 0x07E0  //   0 255  0 (full green for battery gradient)
 #define maxTextSize 5  //larger sourceName text
 #define startBrightness 11
 #define maxBrightness 100
@@ -181,7 +182,7 @@ void setup() {
   // Append last three pairs of MAC to listenerDeviceName to make it some what unique
   byte mac[6];  // the MAC address of your Wifi shield
   WiFi.macAddress(mac);
-  listenerDeviceName = listenerDeviceName + String(mac[3], HEX) + String(mac[4], HEX) + String(mac[5], HEX);
+  listenerDeviceName = listenerDeviceName + String(mac[0], HEX) + String(mac[1], HEX) + String(mac[2], HEX) + String(mac[3], HEX) + String(mac[4], HEX) + String(mac[5], HEX);
 
   // Set WiFi hostname
   wm.setHostname((const char *)listenerDeviceName.c_str());
@@ -320,6 +321,23 @@ void loop() {
 }
 
 //
+// Calculate battery color based on charge level (0-100%)
+// Returns a color gradient from red (0%) to green (100%)
+uint16_t getBatteryColor(int batteryLevel) {
+  // Clamp battery level to 0-100 range
+  batteryLevel = batteryLevel < 0 ? 0 : batteryLevel;
+  batteryLevel = batteryLevel > 100 ? 100 : batteryLevel;
+  
+  // Interpolate between red (255,0,0) and green (0,255,0)
+  // At 0%: full red, at 100%: full green
+  int r = 255 - (batteryLevel * 255 / 100);
+  int g = batteryLevel * 255 / 100;
+  int b = 0;
+  
+  // Convert RGB to 565 format
+  return m5_color565(r, g, b);
+}
+
 void showSettings() {
   currentScreen = 1;
   logger("showSettings()", "info-quiet");
@@ -353,8 +371,13 @@ void showSettings() {
   int batteryLevel = floor(100.0 * ((1.01 * StickCP2.Power.getBatteryVoltage() / 1000) / 4));
   batteryLevel = batteryLevel > 100 ? 100 : batteryLevel;
   if (StickCP2.Power.getBatteryCurrent() > 0) {
+    // Charging - use green color
+    m5_setTextColor(GREEN_FULL, BLACK);
     StickCP2.Display.println("Charging...");  // show when M5 is plugged in
   } else {
+    // Set color based on battery level
+    uint16_t batteryColor = getBatteryColor(batteryLevel);
+    m5_setTextColor(batteryColor, BLACK);
     StickCP2.Display.println(String(batteryLevel) + "%");
   }
 #else
@@ -362,8 +385,13 @@ void showSettings() {
   int batteryLevel = floor(100.0 * (((M5.Axp.GetBatVoltage()) - 3.0) / (4.07 - 3.0)));
   batteryLevel = batteryLevel > 100 ? 100 : batteryLevel;
   if (batteryLevel >= 100) {
+    // Charging - use green color
+    m5_setTextColor(GREEN_FULL, BLACK);
     M5.Lcd.println("Charging...");  // show when M5 is plugged in
   } else {
+    // Set color based on battery level
+    uint16_t batteryColor = getBatteryColor(batteryLevel);
+    m5_setTextColor(batteryColor, BLACK);
     M5.Lcd.println(String(batteryLevel) + "%");
   }
 #endif
