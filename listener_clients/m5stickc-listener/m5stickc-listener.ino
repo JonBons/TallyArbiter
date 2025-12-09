@@ -29,7 +29,7 @@
 //
 //#define STICK_C
 //#define STICK_C_PLUS
-//#define STICK_C_PLUS2
+#define STICK_C_PLUS2
 
 // The default is M5StickC if nothing is specified. This is also the only
 // supported board type in the github builds.
@@ -70,11 +70,13 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include "Free_Fonts.h"
+#include "esp_sleep.h"
 
 #define TRIGGER_PIN 0  //reset pin
 #define GREY 0x0020    //   8  8  8
 #define GREEN 0x0200   //   0 64  0
 #define RED 0xF800     // 255  0  0
+#define YELLOW 0xFFE0  // 255 255  0
 #define maxTextSize 5  //larger sourceName text
 #define startBrightness 11
 #define maxBrightness 100
@@ -154,6 +156,7 @@ String LastMessage = "";
 bool networkConnected = false;
 int currentScreen = 0;                    //0 = Tally Screen, 1 = Settings Screen
 int currentBrightness = startBrightness;  //12 is Max level on m5stickC but 100 on m5stickC-Plus, unknown on m5stickC-Plus2
+bool prefsDirty = false;                  // Flag to indicate preferences were changed and restart is required
 
 WiFiManager wm;  // global wm instance
 bool portalRunning = false;
@@ -184,6 +187,7 @@ void setup() {
   wm.setHostname((const char *)listenerDeviceName.c_str());
 
   m5_begin();
+  
   m5_setRotation(3);
   m5_fillScreen(TFT_BLACK);
 
@@ -218,6 +222,9 @@ void setup() {
   }
 
   preferences.end();
+  
+  // Clear preferences dirty flag after reading preferences
+  prefsDirty = false;
 
   delay(100);          //wait 100ms before moving on
   connectToNetwork();  //starts Wifi connection
@@ -330,6 +337,14 @@ void showSettings() {
 
   m5_println("Tally Arbiter Server:");
   m5_println(String(tallyarbiter_host) + ":" + String(tallyarbiter_port));
+  
+  // Check if preferences were changed and restart is required
+  if (prefsDirty) {
+    m5_setTextColor(YELLOW, BLACK);
+    m5_print("Restart required for settings");
+    m5_setTextColor(WHITE, BLACK);
+  }
+  
   m5_println();
   m5_print("Battery: ");
 
@@ -493,15 +508,21 @@ void saveParamCallback() {
   logger("PARAM tally Arbiter Server = " + getParam("taHostIP"), "info-quiet");
   String str_taHost = getParam("taHostIP");
   String str_taPort = getParam("taHostPort");
-
-  //str_taHost.toCharArray(tallyarbiter_host, 40);
-  //saveEEPROM();
+  
   logger("Saving new TallyArbiter host", "info-quiet");
   logger(str_taHost, "info-quiet");
   preferences.begin("tally-arbiter", false);
   preferences.putString("taHost", str_taHost);
   preferences.putString("taPort", str_taPort);
   preferences.end();
+  
+  // Set dirty flag to indicate restart is required
+  prefsDirty = true;
+  
+  // Refresh settings view to show updated values and restart message
+  if (currentScreen == 1) {
+    showSettings();
+  }
 }
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -752,6 +773,9 @@ void SetDeviceName() {
 }
 
 void evaluateMode() {
+  // Ensure sleep mode is disabled when in evaluate mode (showing tally)
+  disableSleepMode();
+  
   if (actualType != prevType) {
     configureDisplayToEvaluateMode();
     actualColor.replace("#", "");
@@ -763,9 +787,9 @@ void evaluateMode() {
 
     if (actualType != "") {
       m5_setTextColor(BLACK);
-      m5_fillScreen(M5.Lcd.color565(r, g, b));
+      uint16_t color565 = m5_color565(r, g, b);
+      m5_fillScreen(color565);
       m5_println(DeviceName);
-
     } else {
       m5_setTextColor(DARKGREY, BLACK);
       m5_fillScreen(TFT_BLACK);
@@ -914,11 +938,19 @@ void m5_setTextColor(uint16_t fgcolor, uint16_t bgcolor) {
 #endif
 }
 
-void m5_fillScreen(uint32_t color) {
+void m5_fillScreen(uint16_t color) {
 #if defined(STICK_C_PLUS2)
   StickCP2.Display.fillScreen(color);
 #else
   M5.Lcd.fillScreen(color);
+#endif
+}
+
+uint16_t m5_color565(uint8_t r, uint8_t g, uint8_t b) {
+#if defined(STICK_C_PLUS2)
+  return StickCP2.Display.color565(r, g, b);
+#else
+  return M5.Lcd.color565(r, g, b);
 #endif
 }
 
@@ -1024,4 +1056,18 @@ void m5_setRotation(uint_fast8_t rotation) {
 #else
   M5.Lcd.setRotation(rotation);
 #endif
+}
+
+void disableSleepMode() {
+  // Disable ESP32 sleep modes to prevent device from sleeping during operation
+  // This ensures the device stays awake when displaying tally information
+  
+  // Disable all wakeup sources (prevents accidental sleep triggers)
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  
+  // Configure power domains to stay active (prevents light sleep)
+  // WiFi power domain must stay on to maintain connection
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_ON);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_ON);
 }
