@@ -29,7 +29,7 @@
 //
 //#define STICK_C
 //#define STICK_C_PLUS
-#define STICK_C_PLUS2
+//#define STICK_C_PLUS2
 
 // The default is M5StickC if nothing is specified. This is also the only
 // supported board type in the github builds.
@@ -162,6 +162,15 @@ bool prefsDirty = false;                  // Flag to indicate preferences were c
 WiFiManager wm;  // global wm instance
 bool portalRunning = false;
 
+// Screen timeout variables
+bool screenOn = true;                      // Track screen on/off state
+unsigned long lastActivityTime = 0;       // Last time any activity was detected
+unsigned long screenTimeoutMs = 10 * 60 * 1000;  // 10 minutes in milliseconds
+bool wasCharging = false;                  // Track previous charging state
+String prevTallyColor = "";                // Track previous tally color for change detection
+float prevAccelX = 0, prevAccelY = 0, prevAccelZ = 0;  // Previous accelerometer values for motion detection
+const float MOTION_THRESHOLD = 0.03;        // Threshold for detecting motion (g-force)
+
 // Lcd size
 // m5stickC: 80x160
 // m5StickC Plus: 135x240
@@ -189,6 +198,23 @@ void setup() {
 
   m5_begin();
   
+  // Initialize IMU for motion detection
+#if defined(STICK_C_PLUS2)
+  // Plus2 IMU is initialized automatically with begin()
+  // Initialize previous accelerometer values
+  if (StickCP2.Imu.update()) {
+    auto imu_update = StickCP2.Imu.getImuData();
+    prevAccelX = imu_update.accel.x;
+    prevAccelY = imu_update.accel.y;
+    prevAccelZ = imu_update.accel.z;
+  }
+#else
+  // Initialize IMU for M5StickC and M5StickC Plus
+  M5.IMU.Init();
+  // Initialize previous accelerometer values
+  M5.IMU.getAccelData(&prevAccelX, &prevAccelY, &prevAccelZ);
+#endif
+  
   m5_setRotation(3);
   m5_fillScreen(TFT_BLACK);
 
@@ -196,6 +222,11 @@ void setup() {
 
   m5_setTextColor(WHITE, BLACK);
   m5_println("booting...");
+  
+  // Initialize charging state and activity time
+  wasCharging = isCharging();
+  lastActivityTime = millis();
+  prevTallyColor = "";  // Initialize previous tally color
 
   logger("Tally Arbiter " + listenerDeviceHW + " Listener Client booting.", "info");
   logger("Listener device name: " + listenerDeviceName, "info");
@@ -304,6 +335,7 @@ void loop() {
 
   // Is screen changed?
   if (btnM5.isClick()) {
+    recordActivity();  // Button press is activity
     switch (currentScreen) {
       case 0:
         showSettings();
@@ -316,8 +348,17 @@ void loop() {
 
   // Is screen brightness changed?
   if (btnAction.isClick()) {
+    recordActivity();  // Button press is activity
     updateBrightness();
   }
+
+  // Check for motion and record activity if detected
+  if (detectMotion()) {
+    recordActivity();
+  }
+  
+  // Manage screen timeout based on charging state and activity
+  manageScreenTimeout();
 }
 
 //
@@ -384,15 +425,16 @@ void showSettings() {
   // TODO: The battery voltage code is flawed
   int batteryLevel = floor(100.0 * (((M5.Axp.GetBatVoltage()) - 3.0) / (4.07 - 3.0)));
   batteryLevel = batteryLevel > 100 ? 100 : batteryLevel;
-  if (batteryLevel >= 100) {
+  // Use proper charging detection via AXP power management
+  if (isCharging()) {
     // Charging - use green color
     m5_setTextColor(GREEN_FULL, BLACK);
-    M5.Lcd.println("Charging...");  // show when M5 is plugged in
+    m5_println("Charging...");  // show when M5 is plugged in
   } else {
     // Set color based on battery level
     uint16_t batteryColor = getBatteryColor(batteryLevel);
     m5_setTextColor(batteryColor, BLACK);
-    M5.Lcd.println(String(batteryLevel) + "%");
+    m5_println(String(batteryLevel) + "%");
   }
 #endif
 }
@@ -417,6 +459,13 @@ void showDeviceInfo() {
 }
 
 void updateBrightness() {
+  // If screen is off, wake it first (this will restore brightness)
+  if (!screenOn) {
+    turnScreenOn();
+    // After waking, we'll update brightness below
+  }
+  
+  // Update brightness level
   if (currentBrightness >= maxBrightness) {
     currentBrightness = startBrightness;
   } else {
@@ -752,6 +801,13 @@ void processTallyData() {
     actualColor = "";
     actualPriority = 0;
   }
+  
+  // Check if tally color changed and record activity
+  if (actualColor != prevTallyColor) {
+    prevTallyColor = actualColor;
+    recordActivity();  // Tally color change is activity
+  }
+  
   evaluateMode();
 }
 
@@ -878,6 +934,7 @@ void checkReset() {
     // poor mans debounce/press-hold, code not ideal for production
     delay(50);
     if (digitalRead(TRIGGER_PIN) == LOW) {
+      recordActivity();  // Reset button press is activity
       m5_fillScreen(TFT_BLACK);
       configureDisplayToCheckReset();
 
@@ -1098,4 +1155,139 @@ void disableSleepMode() {
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_ON);
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_ON);
+}
+
+// Check if device is currently charging
+bool isCharging() {
+#if defined(STICK_C_PLUS2)
+  return StickCP2.Power.getBatteryCurrent() > 0;
+#else
+  // For M5StickC and M5StickC Plus, use AXP power management to detect charging
+  // Check if charging current is positive (device is being charged)
+  float chargeCurrent = M5.Axp.GetVBusCurrent();
+  return chargeCurrent > 0;
+#endif
+}
+
+// Detect motion using IMU/accelerometer
+bool detectMotion() {
+  float accelX = 0, accelY = 0, accelZ = 0;
+  
+#if defined(STICK_C_PLUS2)
+  // Plus2 uses different IMU - check if available
+  if (StickCP2.Imu.update()) {
+    auto imu_update = StickCP2.Imu.getImuData();
+    accelX = imu_update.accel.x;
+    accelY = imu_update.accel.y;
+    accelZ = imu_update.accel.z;
+  } else {
+    return false;  // IMU not available
+  }
+#else
+  // For M5StickC and M5StickC Plus, use M5.IMU
+  M5.IMU.getAccelData(&accelX, &accelY, &accelZ);
+#endif
+
+  // Calculate change in acceleration (motion detection)
+  float deltaX = abs(accelX - prevAccelX);
+  float deltaY = abs(accelY - prevAccelY);
+  float deltaZ = abs(accelZ - prevAccelZ);
+  
+  // Update previous values
+  prevAccelX = accelX;
+  prevAccelY = accelY;
+  prevAccelZ = accelZ;
+  
+  // Check if motion exceeds threshold
+  return (deltaX > MOTION_THRESHOLD || deltaY > MOTION_THRESHOLD || deltaZ > MOTION_THRESHOLD);
+}
+
+// Turn screen on
+void turnScreenOn() {
+  if (!screenOn) {
+    screenOn = true;
+    currentBrightness = maxBrightness;
+    logger("Screen turned ON", "info-quiet");
+#if !defined(STICK_C_PLUS2)
+    M5.Axp.ScreenBreath(currentBrightness);
+#else
+    // For Plus2, brightness control is not yet implemented in updateBrightness()
+    // Screen will be on by default, we just need to redraw
+    // TODO: Implement proper brightness control for Plus2 when available
+#endif
+    // Redraw current screen
+    if (currentScreen == 0) {
+      showDeviceInfo();
+    } else {
+      showSettings();
+    }
+  }
+}
+
+// Turn screen off
+void turnScreenOff() {
+  if (screenOn) {
+    screenOn = false;
+    logger("Screen turned OFF, brightness was at " + String(currentBrightness), "info-quiet");
+#if !defined(STICK_C_PLUS2)
+    M5.Axp.ScreenBreath(0);  // Set brightness to 0 to turn off screen
+#else
+    // For Plus2, fill screen black as workaround until brightness control is available
+    // This provides visual feedback but doesn't actually turn off backlight
+    StickCP2.Display.fillScreen(TFT_BLACK);
+    // TODO: Implement proper screen off for Plus2 when brightness control is available
+#endif
+  }
+}
+
+// Record activity and wake screen if needed
+void recordActivity() {
+  lastActivityTime = millis();
+  if (!screenOn) {
+    turnScreenOn();
+  }
+}
+
+// Manage screen timeout based on charging state and activity
+void manageScreenTimeout() {
+  bool currentlyCharging = isCharging();
+  
+  // If charging state changed (plugged in or unplugged), wake screen
+  if (currentlyCharging != wasCharging) {
+    wasCharging = currentlyCharging;
+    if (currentlyCharging) {
+      logger("Device plugged in - screen timeout enabled", "info-quiet");
+      lastActivityTime = millis();  // Reset timeout when plugged in
+    } else {
+      logger("Device unplugged - screen timeout disabled", "info-quiet");
+      turnScreenOn();  // Always wake screen when unplugged
+    }
+    
+    // Trigger screen update when charge state changes
+    switch (currentScreen) {
+      case 0:
+        showDeviceInfo();
+        break;
+      case 1:
+        showSettings(); // update screen of new state of charge
+        break;
+    }
+  }
+  
+  // In production (not charging), screen should never time out
+  if (!currentlyCharging) {
+    if (!screenOn) {
+      turnScreenOn();  // Ensure screen is on when not charging
+    }
+    return;
+  }
+  
+  // When charging, check for timeout
+  if (currentlyCharging) {
+    unsigned long timeSinceActivity = millis() - lastActivityTime;
+    
+    if (timeSinceActivity >= screenTimeoutMs && screenOn) {
+      turnScreenOff();
+    }
+  }
 }
