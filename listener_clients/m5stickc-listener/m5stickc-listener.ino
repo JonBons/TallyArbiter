@@ -411,7 +411,7 @@ void showSettings() {
   // TODO: The battery voltage code is flawed
   int batteryLevel = floor(100.0 * ((1.01 * StickCP2.Power.getBatteryVoltage() / 1000) / 4));
   batteryLevel = batteryLevel > 100 ? 100 : batteryLevel;
-  if (StickCP2.Power.getBatteryCurrent() > 0) {
+  if (isCharging()) {
     // Charging - use green color
     m5_setTextColor(GREEN_FULL, BLACK);
     StickCP2.Display.println("Charging...");  // show when M5 is plugged in
