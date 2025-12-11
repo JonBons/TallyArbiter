@@ -1,6 +1,49 @@
+# Git
 .git/
 .github/
-bin/
+.gitignore
+.gitattributes
+
+# Documentation
 docs/
+*.md
+!readme.md
+
+# Build artifacts (will be copied explicitly)
+bin/
+build/
+src/
+UI/
+tsconfig.json
+tsconfig.*.json
+
+# Dependencies (will be installed in container)
 node_modules/
 UI/node_modules/
+
+# Development files
+.vscode/
+.idea/
+*.log
+.env.local
+.env.*.local
+
+# Test files
+*.test.ts
+*.spec.ts
+**/__tests__/
+**/test/
+
+# CI/CD
+.github/
+
+# Electron
+electron-builder.json
+dev-app-update.yml
+entitlements.mac.plist
+
+# Other
+.DS_Store
+*.swp
+*.swo
+*~
