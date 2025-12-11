@@ -23,6 +23,7 @@ import { User } from 'src/app/_models/User'
 import { AuthService } from 'src/app/_services/auth.service'
 import { JsonEditorComponent, JsonEditorOptions } from 'ang-jsoneditor'
 import { default as configSchema } from '../../../../../src/_helpers/configSchema'
+import { ConfigFixService, ConfigFix } from 'src/app/_services/config-fix.service'
 
 const globalSwalOptions = {
 	confirmButtonColor: '#2a70c7',
@@ -111,6 +112,8 @@ export class SettingsComponent {
 	public updatedConfig = {}
 	public updatedConfigValid = true
 	public updatedRawConfig = ''
+	public configErrors: any[] = []
+	public configFixes: ConfigFix[] = []
 	@ViewChild('configEditor', { static: false }) configEditor!: JsonEditorComponent
 	public jsonEditorOptions = new JsonEditorOptions()
 
@@ -121,6 +124,7 @@ export class SettingsComponent {
 		public socketService: SocketService,
 		private router: Router,
 		public authService: AuthService,
+		private configFixService: ConfigFixService,
 	) {
 		this.socketService.joinAdmins()
 		this.socketService.closeModals.subscribe(() => this.modalService.dismissAll())
@@ -810,8 +814,12 @@ export class SettingsComponent {
 		const errors = editorJson.validateSchema.errors
 		if (errors && errors.length > 0) {
 			this.updatedConfigValid = false
+			this.configErrors = errors
+			this.configFixes = this.configFixService.generateFixes(errors, this.updatedConfig)
 		} else {
 			this.updatedConfigValid = true
+			this.configErrors = []
+			this.configFixes = []
 		}
 	}
 
@@ -864,5 +872,150 @@ export class SettingsComponent {
 			}
 			input.click()
 		} catch (e) {}
+	}
+
+	public async applyFixes() {
+		if (this.configFixes.length === 0) {
+			return
+		}
+
+		const originalConfig = JSON.parse(JSON.stringify(this.updatedConfig))
+		let currentConfig = JSON.parse(JSON.stringify(this.updatedConfig))
+		const approvedFixes: ConfigFix[] = []
+
+		// Process each fix one by one
+		for (let i = 0; i < this.configFixes.length; i++) {
+			const fix = this.configFixes[i]
+			const diff = this.configFixService.generateDiff(fix, currentConfig)
+
+			const result = await Swal.fire({
+				title: `Fix ${i + 1} of ${this.configFixes.length}`,
+				html: `
+					<div style="text-align: left;">
+						<p><strong>Issue:</strong> ${this.escapeHtml(fix.description)}</p>
+						<p><strong>Path:</strong> <code style="background: #f8f9fa; padding: 2px 6px; border-radius: 3px;">${this.escapeHtml(diff.path)}</code></p>
+						<hr>
+						<div style="display: flex; gap: 20px; margin-top: 15px;">
+							<div style="flex: 1;">
+								<h5 style="color: #dc3545;">Before:</h5>
+								<pre style="background: #fff3cd; padding: 10px; border-radius: 4px; max-height: 200px; overflow: auto; text-align: left; border: 1px solid #ffc107; white-space: pre-wrap; word-wrap: break-word;">${this.escapeHtml(diff.before)}</pre>
+							</div>
+							<div style="flex: 1;">
+								<h5 style="color: #28a745;">After:</h5>
+								<pre style="background: #d4edda; padding: 10px; border-radius: 4px; max-height: 200px; overflow: auto; text-align: left; border: 1px solid #28a745; white-space: pre-wrap; word-wrap: break-word;">${this.escapeHtml(diff.after)}</pre>
+							</div>
+						</div>
+					</div>
+				`,
+				showCancelButton: true,
+				confirmButtonText: 'Apply Fix',
+				cancelButtonText: 'Skip',
+				denyButtonText: 'Reject',
+				showDenyButton: false,
+				confirmButtonColor: '#2a70c7',
+				cancelButtonColor: '#6c757d',
+				width: '800px',
+				customClass: {
+					popup: 'swal2-popup-fix-review',
+				},
+			})
+
+			if (result.isConfirmed) {
+				approvedFixes.push(fix)
+				currentConfig = this.configFixService.applyFix(currentConfig, fix)
+			}
+		}
+
+		// Show final summary with full diff if any fixes were approved
+		if (approvedFixes.length > 0) {
+			const finalResult = await Swal.fire({
+				title: 'Review All Changes',
+				html: `
+					<div style="text-align: left;">
+						<p><strong>You approved ${approvedFixes.length} of ${this.configFixes.length} fixes.</strong></p>
+						<p>Review the complete diff below before applying changes:</p>
+						<hr>
+						<div style="display: flex; gap: 20px; margin-top: 15px;">
+							<div style="flex: 1;">
+								<h5 style="color: #dc3545;">Original Config:</h5>
+								<pre style="background: #fff3cd; padding: 10px; border-radius: 4px; max-height: 400px; overflow: auto; text-align: left; border: 1px solid #ffc107; white-space: pre-wrap; word-wrap: break-word; font-size: 12px;">${this.escapeHtml(JSON.stringify(originalConfig, null, 2))}</pre>
+							</div>
+							<div style="flex: 1;">
+								<h5 style="color: #28a745;">Updated Config:</h5>
+								<pre style="background: #d4edda; padding: 10px; border-radius: 4px; max-height: 400px; overflow: auto; text-align: left; border: 1px solid #28a745; white-space: pre-wrap; word-wrap: break-word; font-size: 12px;">${this.escapeHtml(JSON.stringify(currentConfig, null, 2))}</pre>
+							</div>
+						</div>
+						<div style="margin-top: 15px; padding: 10px; background: #e7f3ff; border-radius: 4px; border: 1px solid #2a70c7;">
+							<p style="margin: 0;"><strong>Summary of changes:</strong></p>
+							<ul style="margin: 5px 0 0 0; padding-left: 20px;">
+								${approvedFixes.map((fix) => `<li>${this.escapeHtml(fix.description)}</li>`).join('')}
+							</ul>
+						</div>
+					</div>
+				`,
+				showCancelButton: true,
+				showDenyButton: true,
+				confirmButtonText: 'Apply Changes',
+				cancelButtonText: 'Reject Changes',
+				denyButtonText: 'Cancel',
+				confirmButtonColor: '#28a745',
+				cancelButtonColor: '#dc3545',
+				denyButtonColor: '#6c757d',
+				width: '1200px',
+				customClass: {
+					popup: 'swal2-popup-fix-review',
+				},
+			})
+
+			if (finalResult.isConfirmed) {
+				// Apply all approved fixes to the config
+				this.config = currentConfig
+				this.updatedConfig = currentConfig
+				this.updatedRawConfig = JSON.stringify(currentConfig, null, 2)
+				
+				// Update the editor by updating the bound data property
+				// The editor will automatically reflect the change
+				// Re-validate after a short delay to ensure editor is updated
+				setTimeout(() => {
+					if (this.configEditor) {
+						const editorJson = this.configEditor.getEditor()
+						if (editorJson) {
+							editorJson.set(currentConfig)
+							editorJson.validate()
+							this.configUpdated(currentConfig)
+						}
+					}
+				}, 100)
+
+				await Swal.fire({
+					title: 'Changes Applied',
+					text: `Successfully applied ${approvedFixes.length} fix(es) to your config.`,
+					icon: 'success',
+					confirmButtonColor: '#2a70c7',
+				})
+			} else if (finalResult.isDismissed && finalResult.dismiss === Swal.DismissReason.cancel) {
+				// User clicked "Reject Changes"
+				await Swal.fire({
+					title: 'Changes Rejected',
+					text: 'All changes have been discarded. Your config remains unchanged.',
+					icon: 'info',
+					confirmButtonColor: '#2a70c7',
+				})
+			}
+			// If user clicked "Cancel" (deny button), do nothing - just close the dialog
+		} else {
+			await Swal.fire({
+				title: 'No Fixes Applied',
+				text: 'No fixes were approved.',
+				icon: 'info',
+				confirmButtonColor: '#2a70c7',
+			})
+		}
+	}
+
+	private escapeHtml(text: string): string {
+		const div = document.createElement('div')
+		div.textContent = text
+		return div.innerHTML
 	}
 }
