@@ -460,25 +460,13 @@
 					</div>
 					<div class="row">
 						<h3>Config editor</h3>
-						<div *ngIf="configFixes.length > 0" class="alert alert-warning" role="alert">
-							<i class="fas fa-exclamation-triangle"></i>
-							<strong>{{ configFixes.length }} issue(s) detected.</strong> Click "Apply Fixes" to review and apply suggested fixes.
-						</div>
 						<json-editor
 							[options]="jsonEditorOptions"
 							[data]="config"
 							(change)="configUpdated($event)"
 							#configEditor
 						></json-editor>
-						<div style="display: flex; justify-content: flex-end; gap: 10px;">
-							<button
-								*ngIf="configFixes.length > 0"
-								class="btn btn-warning m-1"
-								(click)="applyFixes()"
-								title="Review and apply suggested fixes"
-							>
-								<i class="fas fa-magic"></i> Apply Fixes ({{ configFixes.length }})
-							</button>
+						<div style="display: flex; justify-content: flex-end">
 							<button class="btn btn-primary m-1" (click)="saveConfig()" [disabled]="!updatedConfigValid">
 								Save config
 							</button>
